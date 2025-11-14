@@ -2,7 +2,7 @@ import os  # чтобы брать токен из переменных окру
 from telegram.ext import Updater, CommandHandler
 
 # Получаем токен из переменной окружения
-TOKEN = os.getenv("7816687479:AAEurje4CWqERb1aJPtzFPfcINqbylRqLrc")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 # Функция, которая отвечает на команду /start
 def start(update, context):
