@@ -145,13 +145,14 @@ def start(update, context):
     update.message.reply_text("Бот запущен! Используй /auto для автосигналов.")
 
 # ===== Запуск бота =====
-if __name__ == "__main__":
-    updater = Updater(TOKEN)  # добавляем знак "="
+from telegram.ext import ApplicationBuilder, CommandHandler
+
+if _name_ == "_main_":
+    app = ApplicationBuilder().token(TOKEN).build()
     
     # Регистрируем команды
-    updater.dispatcher.add_handler(CommandHandler("start", start))
-    updater.dispatcher.add_handler(CommandHandler("auto", start_auto))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("auto", start_auto))
     
     # Запуск бота
-    updater.start_polling()
-    updater.idle()
+    app.run_polling()
