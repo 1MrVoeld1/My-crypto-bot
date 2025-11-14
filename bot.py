@@ -3,7 +3,6 @@ import requests
 import pandas as pd
 import numpy as np
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from telegram.ext import JobQueue
 from ta.trend import SMAIndicator, EMAIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
@@ -36,26 +35,29 @@ def get_ohlcv(symbol, interval="1h", limit=100):
     df["volume"] = df["volume"].astype(float)
     return df
 
-# ===== Индикаторы и паттерны =====
+# ===== Паттерны =====
 def detect_candlestick(df):
     patterns = []
-    open_p = df["open"].iloc[-1]
-    close_p = df["close"].iloc[-1]
-    high = df["high"].iloc[-1]
-    low = df["low"].iloc[-1]
-    
+    o = df["open"].iloc[-1]
+    c = df["close"].iloc[-1]
+    h = df["high"].iloc[-1]
+    l = df["low"].iloc[-1]
+
     # Doji
-    if abs(open_p - close_p) / (high - low + 1e-9) < 0.1:
+    if abs(o - c) / (h - l + 1e-9) < 0.1:
         patterns.append("Doji")
+
     # Hammer
-    if (high - max(open_p, close_p)) > 2*(max(open_p, close_p) - min(open_p, close_p)):
+    if (h - max(o, c)) > 2 * (max(o, c) - min(o, c)):
         patterns.append("Hammer")
+
     # Engulfing
     if len(df) > 1:
-        prev_open = df["open"].iloc[-2]
-        prev_close = df["close"].iloc[-2]
-        if (close_p > open_p and prev_close < prev_open and close_p > prev_open and open_p < prev_close):
+        po = df["open"].iloc[-2]
+        pc = df["close"].iloc[-2]
+        if (c > o and pc < po and c > po and o < pc):
             patterns.append("Engulfing")
+
     return patterns
 
 def support_resistance(df):
@@ -65,17 +67,21 @@ def support_resistance(df):
     resistance = highs.rolling(window=10).max().iloc[-1]
     return support, resistance
 
+# ===== Аналитика =====
 def analyze_symbol(df, symbol_name):
     sma = SMAIndicator(df["close"], window=20).sma_indicator().iloc[-1]
     ema = EMAIndicator(df["close"], window=20).ema_indicator().iloc[-1]
     rsi = RSIIndicator(df["close"], window=14).rsi().iloc[-1]
     stoch = StochasticOscillator(df["high"], df["low"], df["close"], window=14).stoch().iloc[-1]
     atr = AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
-    bb_high = BollingerBands(df["close"], window=20).bollinger_hband().iloc[-1]
-    bb_low = BollingerBands(df["close"], window=20).bollinger_lband().iloc[-1]
+    bb_h = BollingerBands(df["close"], window=20).bollinger_hband().iloc[-1]
+    bb_l = BollingerBands(df["close"], window=20).bollinger_lband().iloc[-1]
+
     vol = df["volume"].iloc[-1]
     patterns = detect_candlestick(df)
     support, resistance = support_resistance(df)
+
+    price = df["close"].iloc[-1]
 
     side = "HOLD"
     reason = []
@@ -89,76 +95,93 @@ def analyze_symbol(df, symbol_name):
 
     if ema > sma:
         side = "LONG"
-        reason.append("EMA > SMA (восходящий тренд)")
+        reason.append("EMA > SMA (тренд вверх)")
     elif ema < sma:
         side = "SHORT"
-        reason.append("EMA < SMA (нисходящий тренд)")
+        reason.append("EMA < SMA (тренд вниз)")
 
     if patterns:
         reason.append("Паттерн: " + ",".join(patterns))
 
-    price = df["close"].iloc[-1]
-
     if side == "LONG":
-        risk = (price - support)/price*100
+        risk = (price - support) / price * 100
     elif side == "SHORT":
-        risk = (resistance - price)/price*100
+        risk = (resistance - price) / price * 100
     else:
         risk = 0
 
-    reason_str = "; ".join(reason) if reason else "Без явной причины"
-    return f"{symbol_name} {side} {price:.2f} 24ч | Причина: {reason_str} | Риск: {risk:.2f}%"
+    reason_str = "; ".join(reason) if reason else "Нет причины"
+    return f"{symbol_name} → {side} | Цена: {price:.4f} | Причина: {reason_str} | Риск: {risk:.2f}%"
 
 # ===== Автосигналы =====
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.context["chat_id"]
+
     symbols = get_top_symbols()
     signals = []
+
     for sym in symbols:
         try:
             df = get_ohlcv(sym)
             if df is not None:
-                signal = analyze_symbol(df, sym)
-                signals.append(signal)
-        except:
+                signals.append(analyze_symbol(df, sym))
+        except Exception:
             continue
+
     if signals:
         await context.bot.send_message(chat_id=chat_id, text="\n".join(signals))
 
 # ===== Telegram команды =====
 async def start(update, context):
-    await update.message.reply_text("Бот запущен! Используй /auto для автосигналов, /nowsignal для сигнала прямо сейчас и /stopauto для отключения.")
+    await update.message.reply_text(
+        "Бот работает! Команды:\n"
+        "/auto — включить авто-сигналы\n"
+        "/stopauto — отключить\n"
+        "/nowsignal — получить сигнал прямо сейчас"
+    )
 
 async def start_auto(update, context):
     chat_id = update.message.chat_id
-    await update.message.reply_text("Автосигналы включены! Каждые 30 минут будут приходить сигналы.")
-    if context.job_queue:
-        context.job_queue.run_repeating(auto_signal, interval=INTERVAL_SECONDS, first=0, context={"chat_id": chat_id})
+    await update.message.reply_text("Автосигналы включены!")
+
+    context.job_queue.run_repeating(
+        auto_signal,
+        interval=INTERVAL_SECONDS,
+        first=3,
+        context={"chat_id": chat_id},
+        name=str(chat_id)
+    )
 
 async def stop_auto(update, context):
     chat_id = update.message.chat_id
     await update.message.reply_text("Автосигналы отключены!")
-    if context.job_queue:
-        for job in context.job_queue.jobs():
-            if job.context.get("chat_id") == chat_id:
-                job.schedule_removal()
+
+    jobs = context.job_queue.get_jobs_by_name(str(chat_id))
+    for job in jobs:
+        job.schedule_removal()
 
 async def now_signal(update, context):
     chat_id = update.message.chat_id
+
+    await update.message.reply_text("Делаю анализ...")
+
     symbols = get_top_symbols()
     signals = []
+
     for sym in symbols:
         try:
             df = get_ohlcv(sym)
             if df is not None:
-                signal = analyze_symbol(df, sym)
-                signals.append(signal)
-        except:
+                signals.append(analyze_symbol(df, sym))
+        except Exception:
             continue
+
     if signals:
         await update.message.reply_text("\n".join(signals))
+    else:
+        await update.message.reply_text("Не удалось получить данные!")
 
-# ===== Запуск бота =====
+# ===== Запуск =====
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
 
