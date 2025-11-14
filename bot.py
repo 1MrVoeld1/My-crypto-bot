@@ -168,7 +168,7 @@ async def debug_cmd(update, context):
 # ==============================
 # Запуск
 # ==============================
-if _name_ == "_main_":
+if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("nowsignal", nowsignal_cmd))
