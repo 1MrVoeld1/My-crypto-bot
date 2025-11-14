@@ -1,83 +1,70 @@
 import os
 import pandas as pd
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import numpy as np
+import ccxt
+import plotly.graph_objects as go
 from ta.trend import SMAIndicator, EMAIndicator
 from ta.momentum import RSIIndicator
-from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from datetime import datetime
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-INTERVAL_SECONDS = 30 * 60  # 30 минут
-TOP_SYMBOL_LIMIT = 250
-
 if TOKEN is None:
     print("Ошибка: TELEGRAM_TOKEN не найден!")
     exit(1)
 
+TOP_SYMBOL_LIMIT = 250
+PERIODS = 50  # количество свечей для анализа
+
 # ==============================
-# Playwright + Bybit
+# CCXT и Bybit
 # ==============================
-def get_bybit_prices():
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto("https://www.bybit.com/derivatives/usdt")
-        page.wait_for_timeout(5000)  # ждём подгрузку данных JS
+exchange = ccxt.bybit({
+    'enableRateLimit': True,
+})
 
-        html = page.content()
-        browser.close()
-
-    soup = BeautifulSoup(html, "html.parser")
-    data = []
-
-    # Примерные селекторы, уточни в DevTools
-    rows = soup.select("div.tableRow")
-    for row in rows:
-        try:
-            symbol = row.select_one("div.symbol").text.strip()
-            price = float(row.select_one("div.lastPrice").text.replace(",", ""))
-            data.append({"symbol": symbol, "price": price})
-        except:
-            continue
-
-    df = pd.DataFrame(data)
-    return df
+def fetch_ohlcv(symbol: str, timeframe="1h", limit=PERIODS):
+    """
+    Получаем исторические свечи с Bybit через ccxt
+    """
+    try:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        return df
+    except Exception as e:
+        print(f"Ошибка OHLCV для {symbol}: {e}")
+        return None
 
 def get_top_symbols(limit=TOP_SYMBOL_LIMIT):
-    df = get_bybit_prices()
-    if df.empty:
+    """
+    Получаем USDT деривативы с Bybit через ccxt
+    """
+    try:
+        markets = exchange.load_markets()
+        symbols = [s for s in markets if "/USDT" in s and markets[s]['type'] == 'future']
+        return symbols[:limit]
+    except Exception as e:
+        print("Ошибка получения символов:", e)
         return []
-    return df["symbol"].tolist()[:limit]
-
-def get_ohlcv(symbol, interval="60", limit=200):
-    df = get_bybit_prices()
-    df_sym = df[df["symbol"] == symbol]
-    if df_sym.empty:
-        return None
-    df_sym["open"] = df_sym["price"]
-    df_sym["high"] = df_sym["price"]
-    df_sym["low"] = df_sym["price"]
-    df_sym["close"] = df_sym["price"]
-    return df_sym
 
 # ==============================
 # Индикаторы и паттерны
 # ==============================
 def detect_candlestick(df):
     patterns = []
-    open_p = df["open"].iloc[-1]
-    close_p = df["close"].iloc[-1]
-    high = df["high"].iloc[-1]
-    low = df["low"].iloc[-1]
+    open_p, close_p, high, low = df["open"].iloc[-1], df["close"].iloc[-1], df["high"].iloc[-1], df["low"].iloc[-1]
 
+    # Doji
     if abs(open_p - close_p) / (high - low + 1e-9) < 0.1:
         patterns.append("Doji")
-    if (high - max(open_p, close_p)) > 2 * (max(open_p, close_p) - min(open_p, close_p)):
+    # Hammer
+    if (high - max(open_p, close_p)) > 2*(max(open_p, close_p) - min(open_p, close_p)):
         patterns.append("Hammer")
+    # Bullish Engulfing
     if len(df) > 1:
-        prev_open = df["open"].iloc[-2]
-        prev_close = df["close"].iloc[-2]
-        if close_p > open_p and prev_close < prev_open and close_p > prev_open and open_p < prev_close:
+        prev_open, prev_close = df["open"].iloc[-2], df["close"].iloc[-2]
+        if (close_p > open_p and prev_close < prev_open and close_p > prev_open and open_p < prev_close):
             patterns.append("Bullish Engulfing")
     return patterns
 
@@ -87,44 +74,58 @@ def support_resistance(df):
     return sup, res
 
 def analyze_symbol(df, symbol_name):
-    sma = SMAIndicator(df["close"], 20).sma_indicator().iloc[-1]
-    ema = EMAIndicator(df["close"], 20).ema_indicator().iloc[-1]
-    rsi = RSIIndicator(df["close"], 14).rsi().iloc[-1]
     price = df["close"].iloc[-1]
     patterns = detect_candlestick(df)
     support, resistance = support_resistance(df)
 
+    sma = SMAIndicator(df["close"], 20).sma_indicator().iloc[-1]
+    ema = EMAIndicator(df["close"], 20).ema_indicator().iloc[-1]
+    rsi = RSIIndicator(df["close"], 14).rsi().iloc[-1]
+
     side = "HOLD"
     reason = []
 
-    if rsi is not None:
-        if rsi < 30:
-            side = "LONG"
-            reason.append("RSI < 30")
-        elif rsi > 70:
-            side = "SHORT"
-            reason.append("RSI > 70")
+    if rsi < 30:
+        side = "LONG"
+        reason.append("RSI < 30")
+    elif rsi > 70:
+        side = "SHORT"
+        reason.append("RSI > 70")
 
-    if ema is not None and sma is not None:
-        if ema > sma:
-            side = "LONG"
-            reason.append("EMA > SMA")
-        elif ema < sma:
-            side = "SHORT"
-            reason.append("EMA < SMA")
+    if ema > sma:
+        side = "LONG"
+        reason.append("EMA > SMA")
+    elif ema < sma:
+        side = "SHORT"
+        reason.append("EMA < SMA")
 
     if patterns:
         reason.append("Pat:" + ",".join(patterns))
 
+    # Риск
     if side == "LONG":
-        risk = (price - support) / price * 100 if price and support else 0
+        risk = (price - support)/price*100
     elif side == "SHORT":
-        risk = (resistance - price) / price * 100 if price and resistance else 0
+        risk = (resistance - price)/price*100
     else:
         risk = 0
 
     reason_str = "; ".join(reason) if reason else "Нет явной причины"
     return f"{symbol_name} {side} {price:.6f} | {reason_str} | Risk:{risk:.2f}%"
+
+def plot_candles(df, symbol_name):
+    fig = go.Figure(data=[go.Candlestick(
+        x=df["timestamp"],
+        open=df["open"],
+        high=df["high"],
+        low=df["low"],
+        close=df["close"],
+        name=symbol_name
+    )])
+    fig.update_layout(title=symbol_name, xaxis_title="Time", yaxis_title="Price")
+    filename = f"{symbol_name.replace('/','_')}.png"
+    fig.write_image(filename)
+    return filename
 
 # ==============================
 # Telegram команды
@@ -136,8 +137,8 @@ async def start(update, context):
         "/debug – статус бота"
     )
 
-async def now_signal(update, context):
-    await update.message.reply_text("Собираю сигналы прямо сейчас...")
+async def nowsignal_cmd(update, context):
+    await update.message.reply_text("Собираю сигналы с реальными данными...")
     symbols = get_top_symbols()
     if not symbols:
         await update.message.reply_text("Ошибка: не удалось получить список символов.")
@@ -145,34 +146,31 @@ async def now_signal(update, context):
 
     signals = []
     for sym in symbols:
-        df = get_ohlcv(sym)
+        df = fetch_ohlcv(sym)
         if df is not None:
             try:
-                signals.append(analyze_symbol(df, sym))
-            except:
+                signal = analyze_symbol(df, sym)
+                signals.append(signal)
+                # график последней свечи
+                img = plot_candles(df.tail(50), sym)
+                await update.message.reply_photo(photo=open(img, "rb"))
+            except Exception as e:
+                print(f"Ошибка анализа {sym}: {e}")
                 continue
-
     if signals:
         await update.message.reply_text("\n".join(signals))
     else:
         await update.message.reply_text("Не удалось получить данные.")
 
-async def debug(update, context):
-    lines = []
-    lines.append(f"TOKEN set: {'yes' if TOKEN else 'no'}")
-    try:
-        df = get_bybit_prices()
-        lines.append(f"Bybit site ok, symbols found: {len(df)}")
-    except Exception as e:
-        lines.append(f"Bybit FAIL ({e})")
-    await update.message.reply_text("\n".join(lines))
+async def debug_cmd(update, context):
+    await update.message.reply_text("Бот работает. ТОКЕН найден: yes")
 
 # ==============================
 # Запуск
 # ==============================
-if __name__ == "__main__":
+if _name_ == "_main_":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("nowsignal", now_signal))
-    app.add_handler(CommandHandler("debug", debug))
+    app.add_handler(CommandHandler("nowsignal", nowsignal_cmd))
+    app.add_handler(CommandHandler("debug", debug_cmd))
     app.run_polling()
