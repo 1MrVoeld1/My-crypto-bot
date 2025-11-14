@@ -1,45 +1,64 @@
 import os
-import requests
 import pandas as pd
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from ta.trend import SMAIndicator, EMAIndicator
 from ta.momentum import RSIIndicator
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+INTERVAL_SECONDS = 30 * 60  # 30 минут
+TOP_SYMBOL_LIMIT = 250
+
 if TOKEN is None:
     print("Ошибка: TELEGRAM_TOKEN не найден!")
     exit(1)
 
-TOP_SYMBOL_LIMIT = 250
-auto_enabled = False
+# ==============================
+# Playwright + Bybit
+# ==============================
+def get_bybit_prices():
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto("https://www.bybit.com/derivatives/usdt")
+        page.wait_for_timeout(5000)  # ждём подгрузку данных JS
 
-# ==============================
-#  Актуальный Bybit API (v5)
-# ==============================
+        html = page.content()
+        browser.close()
+
+    soup = BeautifulSoup(html, "html.parser")
+    data = []
+
+    # Примерные селекторы, уточни в DevTools
+    rows = soup.select("div.tableRow")
+    for row in rows:
+        try:
+            symbol = row.select_one("div.symbol").text.strip()
+            price = float(row.select_one("div.lastPrice").text.replace(",", ""))
+            data.append({"symbol": symbol, "price": price})
+        except:
+            continue
+
+    df = pd.DataFrame(data)
+    return df
+
 def get_top_symbols(limit=TOP_SYMBOL_LIMIT):
-    url = "https://api.bybit.com/v5/market/instruments-info?category=linear"
-    try:
-        data = requests.get(url, timeout=10).json()
-        rows = data.get("result", {}).get("list", [])
-        symbols = [x["symbol"] for x in rows if x.get("quoteCoin") == "USDT"]
-        return symbols[:limit]
-    except Exception as e:
-        print("Ошибка получения символов:", e)
+    df = get_bybit_prices()
+    if df.empty:
         return []
+    return df["symbol"].tolist()[:limit]
 
 def get_ohlcv(symbol, interval="60", limit=200):
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
-    try:
-        data = requests.get(url, timeout=10).json()
-        klines = data.get("result", {}).get("list", [])
-        if not klines:
-            return None
-        df = pd.DataFrame(klines, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
-        df[["open","high","low","close","volume"]] = df[["open","high","low","close","volume"]].astype(float)
-        return df
-    except Exception as e:
-        print("Ошибка OHLCV:", e)
+    df = get_bybit_prices()
+    df_sym = df[df["symbol"] == symbol]
+    if df_sym.empty:
         return None
+    df_sym["open"] = df_sym["price"]
+    df_sym["high"] = df_sym["price"]
+    df_sym["low"] = df_sym["price"]
+    df_sym["close"] = df_sym["price"]
+    return df_sym
 
 # ==============================
 # Индикаторы и паттерны
@@ -58,7 +77,7 @@ def detect_candlestick(df):
     if len(df) > 1:
         prev_open = df["open"].iloc[-2]
         prev_close = df["close"].iloc[-2]
-        if (close_p > open_p and prev_close < prev_open and close_p > prev_open and open_p < prev_close):
+        if close_p > open_p and prev_close < prev_open and close_p > prev_open and open_p < prev_close:
             patterns.append("Bullish Engulfing")
     return patterns
 
@@ -113,51 +132,40 @@ def analyze_symbol(df, symbol_name):
 async def start(update, context):
     await update.message.reply_text(
         "Бот запущен!\n"
-        "/auto – включить автосигналы\n"
-        "/stopauto – отключить\n"
         "/nowsignal – сигнал прямо сейчас\n"
         "/debug – статус бота"
     )
 
-async def auto_cmd(update, context):
-    global auto_enabled
-    auto_enabled = True
-    await update.message.reply_text("Автосигналы включены! Используй /nowsignal для ручного сбора сигналов.")
-
-async def stop_auto_cmd(update, context):
-    global auto_enabled
-    auto_enabled = False
-    await update.message.reply_text("Автосигналы отключены!")
-
-async def nowsignal_cmd(update, context):
+async def now_signal(update, context):
     await update.message.reply_text("Собираю сигналы прямо сейчас...")
     symbols = get_top_symbols()
     if not symbols:
         await update.message.reply_text("Ошибка: не удалось получить список символов.")
         return
+
     signals = []
     for sym in symbols:
         df = get_ohlcv(sym)
         if df is not None:
             try:
                 signals.append(analyze_symbol(df, sym))
-            except Exception:
+            except:
                 continue
+
     if signals:
         await update.message.reply_text("\n".join(signals))
     else:
         await update.message.reply_text("Не удалось получить данные.")
 
-async def debug_cmd(update, context):
-    global auto_enabled
-    msg = f"TOKEN set: {'yes' if TOKEN else 'no'}\nАвтосигналы включены: {auto_enabled}\n"
+async def debug(update, context):
+    lines = []
+    lines.append(f"TOKEN set: {'yes' if TOKEN else 'no'}")
     try:
-        resp = requests.get("https://api.bybit.com/v5/market/instruments-info?category=linear", timeout=5).json()
-        rows = resp.get("result", {}).get("list", [])
-        msg += f"Bybit API OK, symbols found: {len(rows)}"
+        df = get_bybit_prices()
+        lines.append(f"Bybit site ok, symbols found: {len(df)}")
     except Exception as e:
-        msg += f"Bybit API FAIL ({e})"
-    await update.message.reply_text(msg)
+        lines.append(f"Bybit FAIL ({e})")
+    await update.message.reply_text("\n".join(lines))
 
 # ==============================
 # Запуск
@@ -165,8 +173,6 @@ async def debug_cmd(update, context):
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("auto", auto_cmd))
-    app.add_handler(CommandHandler("stopauto", stop_auto_cmd))
-    app.add_handler(CommandHandler("nowsignal", nowsignal_cmd))
-    app.add_handler(CommandHandler("debug", debug_cmd))
+    app.add_handler(CommandHandler("nowsignal", now_signal))
+    app.add_handler(CommandHandler("debug", debug))
     app.run_polling()
