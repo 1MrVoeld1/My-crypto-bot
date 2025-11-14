@@ -2,20 +2,20 @@ import os
 import requests
 import pandas as pd
 import numpy as np
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, JobQueue
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import JobQueue
 from ta.trend import SMAIndicator, EMAIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
 
-# ===== Настройки =====
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-INTERVAL_SECONDS = 30 * 60  # 30 минут
+INTERVAL_SECONDS = 30 * 60  # каждые 30 минут
 
-if not TOKEN:
-    raise ValueError("Ошибка: TELEGRAM_TOKEN не найден! Установите его в Environment Variables.")
+if TOKEN is None:
+    print("Ошибка: TELEGRAM_TOKEN не найден!")
+    exit(1)
 
-# ===== Функции Bybit API =====
+# ===== Bybit API =====
 def get_top_symbols(limit=250):
     url = "https://api.bybit.com/v2/public/tickers"
     resp = requests.get(url).json()
@@ -43,11 +43,14 @@ def detect_candlestick(df):
     close_p = df["close"].iloc[-1]
     high = df["high"].iloc[-1]
     low = df["low"].iloc[-1]
-
+    
+    # Doji
     if abs(open_p - close_p) / (high - low + 1e-9) < 0.1:
         patterns.append("Doji")
-    if (high - max(open_p, close_p)) > 2 * (max(open_p, close_p) - min(open_p, close_p)):
+    # Hammer
+    if (high - max(open_p, close_p)) > 2*(max(open_p, close_p) - min(open_p, close_p)):
         patterns.append("Hammer")
+    # Engulfing
     if len(df) > 1:
         prev_open = df["open"].iloc[-2]
         prev_close = df["close"].iloc[-2]
@@ -62,7 +65,7 @@ def support_resistance(df):
     resistance = highs.rolling(window=10).max().iloc[-1]
     return support, resistance
 
-def analyze_symbol(df, symbol):
+def analyze_symbol(df, symbol_name):
     sma = SMAIndicator(df["close"], window=20).sma_indicator().iloc[-1]
     ema = EMAIndicator(df["close"], window=20).ema_indicator().iloc[-1]
     rsi = RSIIndicator(df["close"], window=14).rsi().iloc[-1]
@@ -97,18 +100,18 @@ def analyze_symbol(df, symbol):
     price = df["close"].iloc[-1]
 
     if side == "LONG":
-        risk = (price - support) / price * 100
+        risk = (price - support)/price*100
     elif side == "SHORT":
-        risk = (resistance - price) / price * 100
+        risk = (resistance - price)/price*100
     else:
         risk = 0
 
     reason_str = "; ".join(reason) if reason else "Без явной причины"
-    return f"{symbol} {side} {price:.2f} 24ч | Причина: {reason_str} | Риск: {risk:.2f}%"
+    return f"{symbol_name} {side} {price:.2f} 24ч | Причина: {reason_str} | Риск: {risk:.2f}%"
 
 # ===== Автосигналы =====
 async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.job.data["chat_id"]
+    chat_id = context.job.context["chat_id"]
     symbols = get_top_symbols()
     signals = []
     for sym in symbols:
@@ -117,23 +120,51 @@ async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
             if df is not None:
                 signal = analyze_symbol(df, sym)
                 signals.append(signal)
-        except Exception:
+        except:
             continue
     if signals:
         await context.bot.send_message(chat_id=chat_id, text="\n".join(signals))
 
 # ===== Telegram команды =====
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот запущен! Используй /auto для автосигналов.")
+async def start(update, context):
+    await update.message.reply_text("Бот запущен! Используй /auto для автосигналов, /nowsignal для сигнала прямо сейчас и /stopauto для отключения.")
 
-async def start_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+async def start_auto(update, context):
+    chat_id = update.message.chat_id
     await update.message.reply_text("Автосигналы включены! Каждые 30 минут будут приходить сигналы.")
-    context.job_queue.run_repeating(auto_signal, interval=INTERVAL_SECONDS, first=0, data={"chat_id": chat_id})
+    if context.job_queue:
+        context.job_queue.run_repeating(auto_signal, interval=INTERVAL_SECONDS, first=0, context={"chat_id": chat_id})
+
+async def stop_auto(update, context):
+    chat_id = update.message.chat_id
+    await update.message.reply_text("Автосигналы отключены!")
+    if context.job_queue:
+        for job in context.job_queue.jobs():
+            if job.context.get("chat_id") == chat_id:
+                job.schedule_removal()
+
+async def now_signal(update, context):
+    chat_id = update.message.chat_id
+    symbols = get_top_symbols()
+    signals = []
+    for sym in symbols:
+        try:
+            df = get_ohlcv(sym)
+            if df is not None:
+                signal = analyze_symbol(df, sym)
+                signals.append(signal)
+        except:
+            continue
+    if signals:
+        await update.message.reply_text("\n".join(signals))
 
 # ===== Запуск бота =====
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("auto", start_auto))
+    app.add_handler(CommandHandler("stopauto", stop_auto))
+    app.add_handler(CommandHandler("nowsignal", now_signal))
+
     app.run_polling()
