@@ -9,4 +9,3 @@ playwright
 plotly
 kaleido
 ccxt
-python-telegram-bot[job-queue]
