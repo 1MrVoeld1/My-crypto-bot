@@ -132,7 +132,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот запущен! Используй /auto для автосигналов.")
 
 # ===== Запуск бота =====
-if _name_ == "_main_":
+if __name__ == "_main_":
     app = ApplicationBuilder().token(TOKEN).job_queue_enabled(True).build()
     
     app.add_handler(CommandHandler("start", start))
