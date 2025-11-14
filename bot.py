@@ -2,16 +2,18 @@ import os
 import requests
 import pandas as pd
 import numpy as np
-from telegram.ext import Updater, CommandHandler
-from telegram.ext import JobQueue
 from ta.trend import SMAIndicator, EMAIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 INTERVAL_SECONDS = 30*60  # каждые 30 минут
+
 if TOKEN is None:
     print("Ошибка: TELEGRAM_TOKEN не найден!")
+
 # ===== Функции Bybit API =====
 def get_top_symbols(limit=250):
     url = "https://api.bybit.com/v2/public/tickers"
@@ -41,13 +43,10 @@ def detect_candlestick(df):
     high = df["high"].iloc[-1]
     low = df["low"].iloc[-1]
     
-    # Doji
     if abs(open_p - close_p) / (high - low + 1e-9) < 0.1:
         patterns.append("Doji")
-    # Hammer
     if (high - max(open_p, close_p)) > 2*(max(open_p, close_p) - min(open_p, close_p)):
         patterns.append("Hammer")
-    # Engulfing
     if len(df) > 1:
         prev_open = df["open"].iloc[-2]
         prev_close = df["close"].iloc[-2]
@@ -63,29 +62,17 @@ def support_resistance(df):
     return support, resistance
 
 def analyze_symbol(df):
-    # Индикаторы тренда
     sma = SMAIndicator(df["close"], window=20).sma_indicator().iloc[-1]
     ema = EMAIndicator(df["close"], window=20).ema_indicator().iloc[-1]
-
-    # Индикаторы перекупленности/перепроданности
     rsi = RSIIndicator(df["close"], window=14).rsi().iloc[-1]
     stoch = StochasticOscillator(df["high"], df["low"], df["close"], window=14).stoch().iloc[-1]
-
-    # Волатильность
     atr = AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
     bb_high = BollingerBands(df["close"], window=20).bollinger_hband().iloc[-1]
     bb_low = BollingerBands(df["close"], window=20).bollinger_lband().iloc[-1]
-
-    # Объёмы
     vol = df["volume"].iloc[-1]
-
-    # Свечные паттерны
     patterns = detect_candlestick(df)
-
-    # Уровни поддержки/сопротивления
     support, resistance = support_resistance(df)
 
-    # Логика сигнала
     side = "HOLD"
     reason = []
 
@@ -108,7 +95,6 @@ def analyze_symbol(df):
     
     price = df["close"].iloc[-1]
 
-    # Простейший расчет риска: расстояние до поддержки/сопротивления в %
     if side == "LONG":
         risk = (price - support)/price*100
     elif side == "SHORT":
@@ -117,10 +103,10 @@ def analyze_symbol(df):
         risk = 0
 
     reason_str = "; ".join(reason) if reason else "Без явной причины"
-    return f"{df['symbol'].iloc[-1]} {side} {price:.2f} 24ч | Причина: {reason_str} | Риск: {risk:.2f}%"
+    return f"{df.get('symbol', ['UNKNOWN'])[-1]} {side} {price:.2f} 24ч | Причина: {reason_str} | Риск: {risk:.2f}%"
 
 # ===== Автосигналы =====
-def auto_signal(context):
+async def auto_signal(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.context["chat_id"]
     symbols = get_top_symbols()
     signals = []
@@ -134,26 +120,22 @@ def auto_signal(context):
         except:
             continue
     if signals:
-        context.bot.send_message(chat_id=chat_id, text="\n".join(signals))
+        await context.bot.send_message(chat_id=chat_id, text="\n".join(signals))
 
 # ===== Telegram команды =====
-def start_auto(update, context):
-    chat_id = update.message.chat_id
-    update.message.reply_text("Автосигналы включены! Каждые 30 минут будут приходить сигналы.")
+async def start_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await update.message.reply_text("Автосигналы включены! Каждые 30 минут будут приходить сигналы.")
     context.job_queue.run_repeating(auto_signal, interval=INTERVAL_SECONDS, first=0, context={"chat_id": chat_id})
 
-def start(update, context):
-    update.message.reply_text("Бот запущен! Используй /auto для автосигналов.")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Бот запущен! Используй /auto для автосигналов.")
 
 # ===== Запуск бота =====
-from telegram.ext import ApplicationBuilder, CommandHandler
-
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(TOKEN).build()
+if _name_ == "_main_":
+    app = ApplicationBuilder().token(TOKEN).job_queue_enabled(True).build()
     
-    # Регистрируем команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("auto", start_auto))
     
-    # Запуск бота
     app.run_polling()
