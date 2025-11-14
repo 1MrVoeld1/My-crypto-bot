@@ -147,7 +147,7 @@ def start(update, context):
 # ===== Запуск бота =====
 from telegram.ext import ApplicationBuilder, CommandHandler
 
-if _name_ == "_main_":
+if __name__" == "_main_":
     app = ApplicationBuilder().token(TOKEN).build()
     
     # Регистрируем команды
