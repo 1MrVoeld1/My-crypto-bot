@@ -10,7 +10,8 @@ from ta.volatility import BollingerBands, AverageTrueRange
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 INTERVAL_SECONDS = 30*60  # каждые 30 минут
-
+if TOKEN is None:
+    print("Ошибка: TELEGRAM_TOKEN не найден!")
 # ===== Функции Bybit API =====
 def get_top_symbols(limit=250):
     url = "https://api.bybit.com/v2/public/tickers"
@@ -147,7 +148,7 @@ def start(update, context):
 # ===== Запуск бота =====
 from telegram.ext import ApplicationBuilder, CommandHandler
 
-if "__name__" == "__main__":
+if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     
     # Регистрируем команды
