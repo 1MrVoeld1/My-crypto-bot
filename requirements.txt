@@ -6,3 +6,5 @@ pandas
 ta==0.11.0
 beautifulsoup4
 playwright
+plotly
+kaleido
