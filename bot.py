@@ -12,11 +12,12 @@ if TOKEN is None:
     print("Ошибка: TELEGRAM_TOKEN не найден!")
     exit(1)
 
-TOP_SYMBOL_LIMIT = 50  # для теста лучше не 250
+TOP_SYMBOL_LIMIT = 50
 TIMEFRAME = "1h"
 PERIODS = 50
-AUTO_INTERVAL = 3600  # секунд, 1 час
+AUTO_INTERVAL = 3600  # 1 час
 auto_enabled = False
+auto_chat_ids = []
 
 exchange = ccxt.bybit({'enableRateLimit': True})
 
@@ -48,13 +49,10 @@ def fetch_ohlcv(symbol: str, timeframe=TIMEFRAME, limit=PERIODS):
 def detect_candlestick(df):
     patterns = []
     open_p, close_p, high, low = df["open"].iloc[-1], df["close"].iloc[-1], df["high"].iloc[-1], df["low"].iloc[-1]
-    # Doji
     if abs(open_p - close_p) / (high - low + 1e-9) < 0.1:
         patterns.append("Doji")
-    # Hammer
     if (high - max(open_p, close_p)) > 2*(max(open_p, close_p) - min(open_p, close_p)):
         patterns.append("Hammer")
-    # Bullish Engulfing
     if len(df) > 1:
         prev_open, prev_close = df["open"].iloc[-2], df["close"].iloc[-2]
         if close_p > open_p and prev_close < prev_open and close_p > prev_open and open_p < prev_close:
@@ -101,7 +99,6 @@ def analyze_symbol(df, symbol_name):
     else:
         risk = 0
 
-    # Примерное время закрытия позиции (для 1h свечей)
     close_in = "2h" if side != "HOLD" else "-"
     reason_str = "; ".join(reason) if reason else "Нет явной причины"
     return f"{symbol_name} | Price: {price:.2f} | Close in: {close_in} | Reason: {reason_str} | Risk: {risk:.2f}%"
@@ -137,6 +134,9 @@ async def nowsignal_cmd(update, context):
 async def auto_cmd(update, context):
     global auto_enabled
     auto_enabled = True
+    chat_id = update.effective_chat.id
+    if chat_id not in auto_chat_ids:
+        auto_chat_ids.append(chat_id)
     await update.message.reply_text("Автосигналы включены!")
 
 async def stop_auto_cmd(update, context):
@@ -165,28 +165,21 @@ async def auto_loop(app):
                     await app.bot.send_message(chat_id, "\n".join(messages[:50]))
         await asyncio.sleep(AUTO_INTERVAL)
 
-# Список чатов, куда слать автосигналы
-auto_chat_ids = []
-
-async def add_chat_id(update):
-    chat_id = update.effective_chat.id
-    if chat_id not in auto_chat_ids:
-        auto_chat_ids.append(chat_id)
-
 # ==============================
 # Запуск
 # ==============================
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("nowsignal", nowsignal_cmd))
-    app.add_handler(CommandHandler("auto", auto_cmd))
-    app.add_handler(CommandHandler("stopauto", stop_auto_cmd))
-    app.add_handler(CommandHandler("debug", debug_cmd))
-    # Добавляем чат в список автосигналов при /auto
-    app.add_handler(CommandHandler("auto", lambda update, ctx: asyncio.create_task(add_chat_id(update))))
+    async def main():
+        app = ApplicationBuilder().token(TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("nowsignal", nowsignal_cmd))
+        app.add_handler(CommandHandler("auto", auto_cmd))
+        app.add_handler(CommandHandler("stopauto", stop_auto_cmd))
+        app.add_handler(CommandHandler("debug", debug_cmd))
 
-    # Запускаем автосигналы в фоне
-    asyncio.create_task(auto_loop(app))
+        # Запускаем автосигналы после старта polling
+        asyncio.create_task(auto_loop(app))
 
-    app.run_polling()
+        await app.run_polling()
+
+    asyncio.run(main())
