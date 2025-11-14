@@ -146,8 +146,12 @@ def start(update, context):
 
 # ===== Запуск бота =====
 if _name_ == "_main_":
-    updater = Updater(TOKEN)
+    updater = Updater(TOKEN)  # добавляем знак "="
+    
+    # Регистрируем команды
     updater.dispatcher.add_handler(CommandHandler("start", start))
     updater.dispatcher.add_handler(CommandHandler("auto", start_auto))
+    
+    # Запуск бота
     updater.start_polling()
     updater.idle()
