@@ -145,7 +145,7 @@ def start(update, context):
     update.message.reply_text("Бот запущен! Используй /auto для автосигналов.")
 
 # ===== Запуск бота =====
-if _name_ == "_main_":
+if "__name__" == "__main__":
     updater = Updater(TOKEN)  # добавляем знак "="
     
     # Регистрируем команды
