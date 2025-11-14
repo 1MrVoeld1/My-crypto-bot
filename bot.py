@@ -3,10 +3,9 @@ import pandas as pd
 import numpy as np
 import ccxt
 import asyncio
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, JobQueue
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from ta.trend import SMAIndicator, EMAIndicator
 from ta.momentum import RSIIndicator
-from datetime import datetime, timedelta
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if TOKEN is None:
@@ -17,6 +16,7 @@ TOP_SYMBOL_LIMIT = 50  # для теста лучше не 250
 TIMEFRAME = "1h"
 PERIODS = 50
 auto_enabled = False
+auto_task = None  # задача автосигналов
 
 exchange = ccxt.bybit({'enableRateLimit': True})
 
@@ -98,10 +98,25 @@ def analyze_symbol(df, symbol_name):
     else:
         risk = 0
 
-    # Примерное время закрытия позиции (для 1h свечей)
     close_in = "2h" if side != "HOLD" else "-"
     reason_str = "; ".join(reason) if reason else "Нет явной причины"
     return f"{symbol_name} | Price: {price:.2f} | Close in: {close_in} | Reason: {reason_str} | Risk: {risk:.2f}%"
+
+# ==============================
+# Автосигналы через asyncio
+# ==============================
+async def auto_signal_loop(context):
+    global auto_enabled
+    while auto_enabled:
+        symbols = get_top_symbols()
+        messages = []
+        for sym in symbols:
+            df = await asyncio.to_thread(fetch_ohlcv, sym)
+            if df is not None:
+                messages.append(analyze_symbol(df, sym))
+        if messages:
+            await context.bot.send_message(chat_id=context.chat_id, text="\n".join(messages[:50]))
+        await asyncio.sleep(3600)  # пауза 60 минут
 
 # ==============================
 # Telegram команды
@@ -118,48 +133,38 @@ async def start(update, context):
 async def nowsignal_cmd(update, context):
     await update.message.reply_text("Собираю сигналы...")
     symbols = get_top_symbols()
-    if not symbols:
-        await update.message.reply_text("Ошибка: не удалось получить список символов.")
-        return
-    signals = []
-    for sym in symbols:
-        df = await asyncio.to_thread(fetch_ohlcv, sym)
-        if df is not None:
-            signals.append(analyze_symbol(df, sym))
-    if signals:
-        await update.message.reply_text("\n".join(signals[:50]))  # не слишком длинное сообщение
-    else:
-        await update.message.reply_text("Не удалось получить данные.")
-
-async def auto_cmd(update, context):
-    global auto_enabled
-    auto_enabled = True
-    await update.message.reply_text("Автосигналы включены!")
-
-async def stop_auto_cmd(update, context):
-    global auto_enabled
-    auto_enabled = False
-    await update.message.reply_text("Автосигналы отключены!")
-
-async def auto_job(context):
-    global auto_enabled
-    if not auto_enabled:
-        return
-    chat_id = context.job.chat_id
-    symbols = get_top_symbols()
     messages = []
     for sym in symbols:
         df = await asyncio.to_thread(fetch_ohlcv, sym)
         if df is not None:
             messages.append(analyze_symbol(df, sym))
     if messages:
-        await context.bot.send_message(chat_id, "\n".join(messages[:50]))
+        await update.message.reply_text("\n".join(messages[:50]))
+    else:
+        await update.message.reply_text("Не удалось получить данные.")
+
+async def auto_cmd(update, context):
+    global auto_enabled, auto_task
+    if auto_enabled:
+        await update.message.reply_text("Автосигналы уже включены!")
+        return
+    auto_enabled = True
+    await update.message.reply_text("Автосигналы включены!")
+    auto_task = asyncio.create_task(auto_signal_loop(context))
+
+async def stop_auto_cmd(update, context):
+    global auto_enabled, auto_task
+    auto_enabled = False
+    if auto_task:
+        auto_task.cancel()
+        auto_task = None
+    await update.message.reply_text("Автосигналы отключены!")
 
 async def debug_cmd(update, context):
     await update.message.reply_text(f"Бот работает. TOKEN найден: {'yes' if TOKEN else 'no'} | Автосигналы: {auto_enabled}")
 
 # ==============================
-# Запуск
+# Запуск бота
 # ==============================
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
@@ -168,6 +173,4 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("auto", auto_cmd))
     app.add_handler(CommandHandler("stopauto", stop_auto_cmd))
     app.add_handler(CommandHandler("debug", debug_cmd))
-    # JobQueue для автосигналов каждые 60 минут
-    job_queue = app.job_queue
-    job
+    app.run_polling()
