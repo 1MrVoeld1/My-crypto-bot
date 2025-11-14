@@ -1,6 +1,8 @@
-python-telegram-bot==20.4
+python-telegram-bot==20.7
 flask
 requests
 numpy
 pandas
 ta==0.11.0
+beautifulsoup4
+playwright
