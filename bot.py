@@ -168,7 +168,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("auto", auto_cmd))
     app.add_handler(CommandHandler("stopauto", stop_auto_cmd))
     app.add_handler(CommandHandler("debug", debug_cmd))
-
     # JobQueue для автосигналов каждые 60 минут
     job_queue = app.job_queue
     job
