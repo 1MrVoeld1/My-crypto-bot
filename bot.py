@@ -8,7 +8,7 @@ from ta.trend import SMAIndicator, EMAIndicator
 from ta.momentum import RSIIndicator
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-YOUR_CHAT_ID = 123456789  # замените на свой ID
+YOUR_CHAT_ID = 7239571933  # замените на свой ID
 
 TOP_SYMBOL_LIMIT = 50
 TIMEFRAME = "1h"
@@ -216,5 +216,5 @@ def main():
 
     app.run_polling()
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     main()
