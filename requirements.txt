@@ -9,3 +9,4 @@ playwright
 plotly
 kaleido
 ccxt
+maplotlib
