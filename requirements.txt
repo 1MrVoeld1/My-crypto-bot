@@ -9,4 +9,4 @@ playwright
 plotly
 kaleido
 ccxt
-maplotlib
+matplotlib
